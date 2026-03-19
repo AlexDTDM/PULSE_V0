@@ -57,24 +57,6 @@ def compute_p_distribution(df, BIN_HOURS):
     return slot_counts.sort_values(['day_of_week', 'hour_bin']).reset_index(drop=True)
 
 
-def compute_wn(nb_pop, nb_pers):
-    K = 50
-    wn = nb_pers / (nb_pers + K)
-    #wn = 0
-    return wn
-
-
-def compute_p_final(df_prob, df_pers_prob):
-    nb_pop  = np.sum(df_prob['count'])
-    nb_pers = np.sum(df_pers_prob['count'])
-    wn = compute_wn(nb_pop, nb_pers)
-
-    df_merged = df_prob.merge(df_pers_prob, on=['day_of_week', 'hour_bin'], how='outer', suffixes=('_pop', '_patient'))
-    df_merged = df_merged.fillna(0)
-    df_merged['p_final'] = (1 - wn) * df_merged['probability_pop'] + wn * df_merged['probability_patient']
-
-    return df_merged, wn
-
 
 def merge_demographics(df, df_demographic, age_bins=None, age_labels=None):
     if age_bins is None:
@@ -423,7 +405,7 @@ def plot_p_distribution_demographic(group_by: str = "sex", BIN_HOURS: int = 4):
 
 # ── plot_all_distribution (adapted from process_data.ipynb) ───────────────────
 
-def plot_all_distribution(df_prob, df_pers_prob, df_final, wn, BIN_HOURS, output=None, n_pop_indiv=None, n_cohort_indiv=None):
+def plot_all_distribution(df_prob, df_pers_prob, df_final, wn, BIN_HOURS, output=None, n_pop_indiv=None, n_cohort_indiv=None, cohort_demographics=None):
     import plotly.graph_objects as go
 
     n_slots_per_day = 24 // BIN_HOURS
@@ -471,9 +453,19 @@ def plot_all_distribution(df_prob, df_pers_prob, df_final, wn, BIN_HOURS, output
         line=dict(color='#DD8452', width=1.5),
         hovertext=make_hover(pers, 'probability', 'Patient'), hoverinfo='text',
     ))
+    cohort_desc = f'Tailored cohort ({n_cohort_indiv or "?"} indiv., {nb_cohort} interactions)'
+    if cohort_demographics:
+        demo_parts = []
+        if cohort_demographics.get("sex"):
+            demo_parts.append(f'sex={cohort_demographics["sex"]}')
+        if cohort_demographics.get("age_range"):
+            demo_parts.append(f'age={cohort_demographics["age_range"][0]}-{cohort_demographics["age_range"][1]}')
+        if demo_parts:
+            cohort_desc += f' [{", ".join(demo_parts)}]'
+
     fig.add_trace(go.Scatter(
         x=fin['x'], y=fin['p_final'],
-        mode='lines', name=f'Tailored cohort ({n_cohort_indiv or "?"} indiv., {nb_cohort} interactions)',
+        mode='lines', name=cohort_desc,
         line=dict(color='#2CA02C', width=2, dash='dash'),
         hovertext=make_hover(fin, 'p_final', 'Tailored cohort'), hoverinfo='text',
     ))
@@ -745,18 +737,17 @@ def get_best_times(
                     age_range_used = age_labels[i]
                     break
 
-        df_target = select_by_demographics(df_merged, sex=sex_filter, age=age_val)
-
+        # Population distribution uses ALL other patients (no demographic filter)
         # Compute probability distributions
         BIN_HOURS = int(BIN_HOURS) if BIN_HOURS is not None else 1
         with contextlib.redirect_stdout(io.StringIO()):
-            df_prob = compute_p_distribution(df_target.copy(), BIN_HOURS)
+            df_prob = compute_p_distribution(df_merged.copy(), BIN_HOURS)
             if not df_pers.empty:
                 df_pers_prob = compute_p_distribution(df_pers.copy(), BIN_HOURS)
             else:
                 df_pers_prob = pd.DataFrame(columns=['day_of_week', 'hour_bin', 'count', 'probability'])
 
-        # Tailored cohort selection (replaces compute_p_final blending)
+        # Tailored cohort selection
         cohort = select_tailored_cohort(df_demographic, patient_id=patient_id.strip())
         cohort_ids = df_demographic.loc[cohort.neighbor_indices, "participant"].tolist()
         df_cohort = df[df["participant"].isin(cohort_ids)]
@@ -1027,10 +1018,9 @@ with gr.Blocks() as demo:
                 age_val, sex_filter = None, None
 
             df_merged = merge_demographics(df, df_demographic)
-            df_target = select_by_demographics(df_merged, sex=sex_filter, age=age_val)
 
             with contextlib.redirect_stdout(io.StringIO()):
-                df_prob = compute_p_distribution(df_target.copy(), BIN_HOURS)
+                df_prob = compute_p_distribution(df_merged.copy(), BIN_HOURS)
                 if not df_pers.empty:
                     df_pers_prob = compute_p_distribution(df_pers.copy(), BIN_HOURS)
                 else:
@@ -1048,9 +1038,14 @@ with gr.Blocks() as demo:
                                      start_day, end_day, start_time, end_time, K=int(k))
 
             df_cohort_final = df_cohort_prob.rename(columns={'probability': 'p_final'})
+            cohort_demo = {
+                "sex": cohort.active_categorical_values.get("participantSex"),
+                "age_range": cohort.age_range,
+            }
             return plot_all_distribution(df_prob, df_pers_prob, df_cohort_final, 0.0, BIN_HOURS,
-                                         output=output, n_pop_indiv=df_target['participant'].nunique(),
-                                         n_cohort_indiv=df_cohort['participant'].nunique())
+                                         output=output, n_pop_indiv=df_merged['participant'].nunique(),
+                                         n_cohort_indiv=df_cohort['participant'].nunique(),
+                                         cohort_demographics=cohort_demo)
         except Exception as e:
             import matplotlib.pyplot as plt
             fig, ax = plt.subplots(); ax.set_title(f"Error: {e}"); ax.axis("off"); return fig
