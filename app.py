@@ -1075,4 +1075,4 @@ with gr.Blocks() as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch(mcp_server=True)
+    demo.launch(mcp_server=True, server_name="0.0.0.0", server_port=7860)
